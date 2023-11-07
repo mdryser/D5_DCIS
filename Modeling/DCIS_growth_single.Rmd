@@ -1,0 +1,418 @@
+---
+title: "DCIS Simulation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+library(knitr)
+knitr::opts_chunk$set(echo = FALSE)
+
+library(tidygraph)
+library(ggraph)
+library(tidyverse)
+library(dplyr)
+library(igraph)
+library(graphlayouts)
+library(scatterpie)
+library(gplots)
+library(Rtsne)
+library(scatterplot3d)
+library(pracma)
+library(diptest)
+library(ggExtra)
+
+source("functs.R")
+
+# Seed used for either the surface or the TEB.BT model
+set.seed(3330)
+```
+
+
+```{r parameters}
+#---------------------------------------------------
+#---  DUCTAL TREE 
+#---------------------------------------------------
+lambda=1/3 #branching rate; mean branch length (mm) is lambda
+G=5 #  max branch level
+q=0.5  # Probability of branch termination ("T") vs further branching ("B")
+
+#---------------------------------------------------
+#---  TUMOR GROWTH
+#---------------------------------------------------
+N = 100 # number of stem cells in each TEB
+start_level<-0 # which level to start the tumor growth; "R"=random
+N.mut=50 # expected number of mutations to be seeded
+N.gen=4  # number of generations in the Big Bang (2^N.gen cells)
+cell.diam<-0.02 # 20 micron cell diameter (mm)
+type="Branch.surface" # type of tumor branching dynamics
+# TEB.BT.mix
+# TEB.BT.nomix
+# TEB.noBT.mix
+# [not yet; TEB.noBT.nomix]
+# Branch.mix
+# Branch.surface
+# Branch.volume
+
+#---------------------------------------------------
+#---  SEQUENCING/POSTPROCESSING
+#---------------------------------------------------
+spot.sample.n<-"max" # how many spots to sample for the analyses
+patch.size<-1
+seq.th<-.1 # targeted sequencing threshold
+pub.mut.thr<-.9
+n.duct<-200 # number of cells in the duct section
+
+
+#---------------------------------------------------
+#---  MUTATION SPREAD VISUALIZATION
+#---------------------------------------------------
+# Choose which mutation
+mut.ind=15
+
+if(type=="Branch.surface"){
+  mut.ind<-10
+  
+}
+
+# What to display for this mutation across the tree? "MAF" or "mutation"
+display.type="MAF"
+
+#---------------------------------------------------
+#---  WARNINGS
+#---------------------------------------------------
+
+if(N %% 2 !=0) {warning('choose an even number of stem cells')}
+
+if(start_level>(G+1) & start_level!="R") {warning('start level exceeds tree')}
+
+
+```
+
+## Tree
+
+
+```{r tree, echo=FALSE}
+
+#------ Create the stochastic tree (force the branch level depth G)
+dum=0 # dummy variable
+while(dum<G){
+  ductal_tree = ductal.tree.sim(lambda=lambda, G=G, q=q)
+  dum=max(vertex_attr(ductal_tree, "level", index = V(ductal_tree)))
+}
+
+#------ Visualize the tree as a dendrogram
+ductal_tree %>%
+  ggraph(layout = "dendrogram", length=length) +
+  geom_node_point() +
+  geom_edge_diagonal() +
+  geom_node_text(aes(label = number), repel=TRUE)
+
+
+
+#---------------------------------------------------
+#---  WARNINGS
+#---------------------------------------------------
+if( spot.sample.n> gorder(ductal_tree)) {
+  warning('sampling more nodes than available')
+  spot.sample.n<- gorder(ductal_tree)
+}
+
+```
+
+## DCIS
+
+Start node is
+```{r tumor, echo=FALSE}
+set.seed(22222)
+if(type=="Branch.surface"){
+set.seed(2222)  
+}
+#------ Generate the initial expansion of the tumor (within starting node)
+mut_track<-BigBang.expansion(N, N.mut, N.gen)
+
+# Number of cells that contain each mutation
+#colSums(mut_track)
+
+#------ Grow the tumor across the tree
+list.out<-dcis.growth(ductal_tree, N, start_level, type, cell.diam, n.duct)
+
+dcis_tree<-list.out[[1]]
+cell_track<-list.out[[2]]
+print(list.out[[3]])
+rm(list.out)
+
+node_list<-dcis_tree %>% 
+  activate(nodes) %>%
+  as_tibble()
+
+edge_list <- dcis_tree %>%
+  activate(edges) %>%
+  as_tibble()
+
+
+if(spot.sample.n == "max"){
+  spot.sample.n<-gorder(dcis_tree)
+}
+
+```
+
+## Tumor Analysis
+
+```{r analysis prep}
+# The summary measures to ascertain
+tumor.sum<-data.frame(n.mutations=0,
+                      n.public=0,
+                      n.private=0,
+                      spatial.corr=0,
+                      EI=0,
+                      #divergence=0,
+                      maf.median=0,
+                      maf.IQR=0,
+                      energy.median=0,
+                      energy.IQR=0)
+
+```
+
+
+```{r preparations}
+
+# Which nodes to sample from the tumor
+spot.vec<-sample(gorder(ductal_tree), spot.sample.n)
+# We will need to access only the selected nodes from the node_list
+node_list_sel<-node_list[spot.vec,]
+
+# Assemble the MAF matrix for all spots
+MAF.matrix<-MAF.conv(cell_track, mut_track, type, patch.size, n.duct)
+# Extract the MAF matrix for the selected spots only
+MAF.matrix <- MAF.matrix[,spot.vec]
+# Mutation matrix based on threshold
+MUT.matrix<- 1*(MAF.matrix>seq.th)
+
+
+
+```
+
+
+
+```{r mutation heatmap}
+
+#---------------------------------------------------
+#--- MUTATION HEATMAP (rows:mutations|cols:spots)
+#---------------------------------------------------
+
+heatmap.vis<-heatmap.2(MUT.matrix,
+               distfun = function (y) dist(y,method = "manhattan"),
+               hclustfun = hclust, 
+               scale = "none",
+               col = c( "#0073C2FF", "#EFC000FF"),
+               key=TRUE,
+               tracecol=NA,
+               key.title="Mutation Key",
+               revC = TRUE,
+               Rowv=TRUE,
+               Colv=TRUE,
+               trace="none",
+               cexRow=.6, 
+               main="")
+
+
+```
+
+```{r mutations}
+
+#---------------------------------------------------
+#--- NUMBER OF PRIVATE AND PUBLIC MUTATIONS
+#---------------------------------------------------
+# Find the mutations that are present in at least one spot
+ind<-which(rowSums(MUT.matrix)>0)
+# Identify the public mutations
+public.vec<-rowSums(MUT.matrix[ind,])/dim(MUT.matrix)[2]>pub.mut.thr
+# Record the summaries
+tumor.sum$n.mutations=length(ind)
+tumor.sum$n.public=sum(public.vec==TRUE)
+tumor.sum$n.private=tumor.sum$n.mutations-tumor.sum$n.public
+
+
+```
+
+### MAF analysis on the spot level
+
+```{r MAF analysis}
+
+#---------------------------------------------------
+#--- Median/IQR of MAF spot-by-spot
+#---------------------------------------------------
+
+# Spot level summary of the mutation MAFs
+# Note the factor of .5 to account for diploid cells
+
+maf.spot<-data.frame(median=apply(MAF.matrix, 2, function(x) median(.5*x[x>seq.th] )),
+                     IQR=apply(MAF.matrix, 2, function(x) IQR(.5*x[x>seq.th] ))
+)
+
+# record the statistics
+tumor.sum$maf.median<-mean(maf.spot$median)
+tumor.sum$maf.IQR<-mean(maf.spot$IQR)
+
+# Plot the MAF median and IQR for each spot
+p1<-ggplot(maf.spot, aes(x=median, y=IQR))+ ylim(0,1)+xlim(0,1)+
+  geom_point(alpha=0.5, size = 1.5)+
+  theme(legend.position = "none", text = element_text(size = 20))+
+  coord_fixed()+
+  xlab("Median MAF")+
+  ylab("MAF IQR")
+
+# Add the marginal density plots
+p1<-ggExtra::ggMarginal(p1, type = "density")
+
+```
+
+### Expansion Index
+
+```{r EI}
+
+#---------------------------------------------------
+#--- EXPANSION INDEX
+#---------------------------------------------------
+
+out.ei<-f.expansion.index(MUT.matrix, node_list_sel)
+
+# Record the expansion index
+tumor.sum$EI<-out.ei[[2]]
+
+# plot all mutations in the spot/diameter plane
+mut.stat<-out.ei[[1]]
+p2<-ggplot(mut.stat, aes(x=spots, y=diam))+geom_point()
+
+
+```
+
+
+```{r pearson}
+
+#---------------------------------------------------
+#--- SPATIAL GENOTYPE CORRELATION
+#---------------------------------------------------
+tumor.sum$spatial.corr<-f.spat.gen.corr(MUT.matrix, node_list_sel$depth)
+
+```
+
+
+```{r ising mutation energy}
+#---------------------------------------------------
+#--- Ising Energy
+#---------------------------------------------------
+
+# Reorder the Mutation matrix according to hierarchical clustering
+ENERGY.matrix<-MUT.matrix[heatmap.vis$rowInd,heatmap.vis$colInd]
+
+# Generate the energy vector of all present mutations
+energy.vec<-f.ising(ENERGY.matrix)
+
+# plot a histogram
+p3<-ggplot(energy.vec, aes(x=energy))+
+  geom_histogram(bins = 20)+
+  xlim(-.2,1)
+
+# Record the median energy
+tumor.sum$energy.median<-median(energy.vec$energy)
+
+# Record the IQR of the energy
+tumor.sum$energy.IQR<-IQR(energy.vec$energy)
+```
+
+
+```{r plots}
+p1
+multiplot( p2, p3, cols=2)
+```
+
+```{r}
+kable(tumor.sum)
+```
+
+### Mutation spread across the tree
+
+```{r mutation spread}
+#---------------------------------------------------
+#---------------------------------------------------
+#---- VISUALIZE THE MUTATION SPREAD ACROSS THE TREE
+#---------------------------------------------------
+#---------------------------------------------------
+
+M=gorder(dcis_tree) # number of nodes in the tree
+
+#--- Choose the mutation to sample
+cells.w.mut<-which(mut_track[,mut.ind]>0)
+
+
+#--- Initialize the frequency columns (present: yes/no)
+node_list$M.yes<-0
+node_list$M.no<-0
+
+#--- Compute the statistics in each node
+
+N.eff = ifelse(type %in% c("TEB.BT.mix","TEB.BT.nomix"), N/2, N)
+
+#--- loop over nodes    
+
+if (display.type=="mutation"){
+  
+  for(m in 1:M){ 
+    #--- Which nodes contain it
+    node_list[m, "M.yes"]<-sum(cell_track[m,1:N.eff]%in%cells.w.mut)/N.eff>seq.th
+    #--- Which nodes don't contain it
+    node_list[m, "M.no"]<-sum(cell_track[m,1:N.eff]%in%cells.w.mut)/(N.eff)<=seq.th
+  }
+  
+} else if (display.type=="MAF") {
+  
+  for(m in 1:M){ 
+    #--- Which nodes contain it
+    node_list[m, "M.yes"]<-sum(cell_track[m,1:N.eff]%in%cells.w.mut)/N.eff
+    #--- Which nodes don't contain it
+    node_list[m, "M.no"]<-sum(!(cell_track[m,1:N.eff]%in%cells.w.mut))/N.eff
+  }
+}
+
+
+
+#--- Reassemble the tree
+dcis_tree<-tbl_graph(nodes = node_list, edges = edge_list, directed = TRUE)
+
+#--- Generate the graph
+p<-  ggraph(dcis_tree,layout = "dendrogram", height=level) +
+  geom_node_point() +
+  geom_edge_diagonal() +
+  geom_node_text(aes(label = number), repel=TRUE)
+
+#--- Extract the n ode coordinates
+pg <- ggplot_build(p)
+V(dcis_tree)$x <- pg$data[[1]]$x/max(pg$data[[1]]$x)
+V(dcis_tree)$y <- pg$data[[1]]$y/max(pg$data[[1]]$y)
+
+#--- Create the pie chart graph
+g<-ggraph(dcis_tree, layout = "manual", x = V(dcis_tree)$x, y = V(dcis_tree)$y) +
+  geom_edge_link0() +
+  geom_scatterpie(
+    cols = c("M.yes","M.no"),
+    data = as_data_frame(dcis_tree, "vertices"),
+    colour = NA,
+    pie_scale = 1.9
+  ) +
+  scale_fill_manual(values=c("M.yes"= "#EFC000FF", "M.no"="#0073C2FF"))+
+  coord_fixed() +
+  theme_graph() +
+  theme(legend.position = "bottom") +
+  #geom_node_text(aes(label = number), nudge_x=0, nudge_y=-.05) +
+  scale_y_reverse()+
+  ggtitle(paste("Mutation in ", round(length(cells.w.mut)/N*100), "% founder SC", sep=""))+
+  geom_node_text(aes(label = number),size=3, repel=TRUE)
+
+g
+
+#ggsave("hu.pdf", width=40, height=40)
+
+```
+

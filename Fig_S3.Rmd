@@ -1,0 +1,187 @@
+---
+title: "Double hierarchical heatmaps, all spot histologies"
+author: "Matt Greenwald / Marc Ryser"
+date: "09/12/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE, echo = FALSE, message = FALSE, warning = FALSE}
+#-----------------------------------------------
+#-- Load packages
+#-----------------------------------------------
+
+library(ggplot2)
+library(dplyr)
+library(Rtsne)
+library(ggsci)
+library(readr)
+library(scales)
+library(stringr)
+library(ggpubr)
+library(gplots)
+
+#-- Color palette
+pal1 <- pal_jco("default")(10)
+
+set.seed(1242)
+
+#-- List of all tumor
+pure.tum<-c("03", "17", "24", "211", "213", "222", "225", "227", "315")
+
+mixed.tum<- c("53","65", "66", "88", "91", "168", "173", "191", "286")
+
+tumors<-c(pure.tum, mixed.tum)
+
+
+#-----------------------------------------------
+#-- Auxiliary function
+#-----------------------------------------------
+
+heatmap_table <- function(DCIS_name){
+  
+  #--  Read in tumor data
+  DCIS_path <- paste("Data/Cleaned_Mutation_calls/CleanedBayesian_Tumor_", DCIS_name, ".csv", sep = "")
+  Tumor <- as.data.frame(read_csv(DCIS_path))
+  Tumor <- Tumor[-1,-1]
+
+  dat.mut <- Tumor
+  
+  #-- All NA's denote a 0.5 probability of the mutation being present
+  for(i in 1:dim(dat.mut)[1]){
+    for(j in 13:dim(dat.mut)[2]){
+      if(is.na(dat.mut[i,j])){
+        dat.mut[i,j] <- 0.5
+      }
+    }
+  }
+  
+  #-- Do the spatial alignment
+  spat<- dat.mut %>% select(x.pos, y.pos, z.pos)
+  tsne_out <- Rtsne(as.matrix(spat),pca=FALSE,dims = 1,perplexity=1,theta=0.0) # Run TSNE
+  dat.mut <- dat.mut[order(tsne_out$Y),]
+  row.names(dat.mut) <- dat.mut$Spot
+  dat.mut <- as.data.frame(dat.mut)
+  
+  #-- Manipulate data heat map
+  dat.mut <- dat.mut %>%
+    select(which(grepl("chr", colnames(dat.mut), fixed=TRUE))) %>%
+    mutate_all(as.numeric)
+  dat.mut<-t(as.matrix(dat.mut))
+  
+  #-- Turn values into binary
+  dat.mut[dat.mut <.05]<-0
+  dat.mut[dat.mut >.95]<-1
+  dat.mut[dat.mut >0 & dat.mut<1]<-.5
+  dat.mut <- as.data.frame(dat.mut)
+  
+  #-- Change spot histology to 3 categories
+  for(i in 1:length.POSIXlt(Tumor)){
+    if(Tumor[i,"Histology"] == "Atypical" | Tumor[i,"Histology"] == "Non-Atypical" ){
+      Tumor[i,"Histology"] <- "Benign"
+    }
+  }
+  
+  #-- Make a vector to give spot colors
+  spotcolors <- data.frame(matrix(ncol = 2, nrow = length(dat.mut)))
+  colnames(spotcolors) <- c("Spot","Color")
+  spotcolors$Spot <- colnames(dat.mut)
+  for(i in 1:length.POSIXlt(spotcolors)){
+    spotcolors[i,"Color"] <- Tumor[which(Tumor[,"Spot"] == spotcolors[i,"Spot"]),"Histology"]
+  }
+  for(i in 1:length.POSIXlt(spotcolors)){
+    if(spotcolors[i,"Color"] == "Normal"){
+      spotcolors[i,"Color"] <- pal1[7]
+    } else if(spotcolors[i,"Color"] == "Benign"){
+      spotcolors[i,"Color"] <- pal1[5]
+    } else if(spotcolors[i,"Color"] == "DCIS"){
+      spotcolors[i,"Color"] <- pal1[6]
+    } else if(spotcolors[i,"Color"] == "Invasive"){
+      spotcolors[i,"Color"] <- pal1[4]
+
+    }
+  }
+  spotcolors <- c(spotcolors$Color)
+  
+  #- Change mutation names
+  namevector <- c()
+  for(i in 1:dim(dat.mut)[1]){
+    indname <- str_split(row.names(dat.mut)[i],":")
+    indname <- indname[[1]][3]
+    namevector <- c(namevector,indname)
+  }
+  row.names(dat.mut) <- make.names(namevector, unique = TRUE)
+ 
+  return(list(dat.mut,spotcolors))
+  
+}
+
+#-----------------------------------------------
+#-- Prepare and plot the legend
+#-----------------------------------------------
+forplotting <- data.frame(matrix(ncol = 3,nrow = 4))
+colnames(forplotting) <- c("x.pos","y.pos","Histology")
+forplotting$x.pos <- c(0.5,1,1.5, 2)
+forplotting$y.pos <- c(0.5,1,1.5,2)
+forplotting$Histology <- c("Normal", "Benign","DCIS","Invasive")
+exampleplot <- ggplot(forplotting,aes(x = x.pos, y = y.pos)) +
+  geom_point(size = 5, aes(color = Histology)) +
+  scale_colour_manual(values = c("Normal"=pal1[7] , "Benign" = pal1[5], "DCIS" = pal1[6],"Invasive" = pal1[4]), name = "Spot Histology", drop = FALSE) +
+  theme(legend.position = "top", legend.box = "vertical") +
+  theme_classic()
+plotlegend <- get_legend(exampleplot)
+plot(plotlegend)
+
+```
+
+
+
+
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+#-----------------------------------------------
+#-- Loop over all tumors and plot them
+#-----------------------------------------------
+for(Tumorname in tumors){
+  output <- heatmap_table(Tumorname)
+X1 <- as.matrix(output[[1]])
+spotcolors <- output[[2]]
+
+#-- Avoid side-by-side plotting
+my_plot_hook <- function(x, options)
+  paste("\n", knitr::hook_plot_tex(x, options), "\n")
+knitr::knit_hooks$set(plot = my_plot_hook)
+
+heatmap.2(X1,
+          distfun = function (y) dist(y,method = "manhattan"),
+          hclustfun = hclust, 
+          scale = "none",
+          col = pal1[c(1,3,2)],
+          key=FALSE,
+          tracecol=NA,
+          key.title="Mutation Key",
+          #colCol = spotcolors,
+          revC = TRUE,
+          Rowv=TRUE,
+          Colv=TRUE,
+          trace="none",
+          cexRow=.6, 
+          main=Tumorname,
+          margins = c(4,8),
+          density.info = "none",
+          breaks = c(0,0.05,0.95,1),
+          key.xlab = "Probability",
+          ColSideColors = spotcolors,
+          dendrogram='none')
+
+   
+} 
+
+
+
+```
+
+
+

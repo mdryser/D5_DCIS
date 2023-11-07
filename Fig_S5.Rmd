@@ -1,0 +1,319 @@
+---
+title: "Expansion_Index_Plots"
+author: "Matt Greenwald / Marc D. Ryser"
+date: 09/12/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, echo=FALSE, include=FALSE,message=FALSE, warning=FALSE}
+#-----------------------------------------------
+#-- Load packages
+#-----------------------------------------------
+library(readr)
+library(ggsci)
+library(scales)
+library(pracma)
+library(dplyr)
+library(magrittr)
+library(knitr)
+library(ggplot2)
+
+#-- Color palette
+pal1 <- pal_jco("default")(10)
+
+#-- Sed
+set.seed(5891)
+
+#-- Tumors included (not 222 cause only 2 DCIS spots) 
+Tumornames <- c("03","17","24","53","65","66","88","91","168","173","191","211","213","225","227","286","315")
+
+
+#-----------------------------------------------
+#-- Parameters
+#-----------------------------------------------
+purity=.8 # tumor purity
+cutoff=.05 # detection threshold
+c0=.5 # prior prob of a mutation being absent (delta-weight)
+p.mut.no<-c0*(1+pbeta(cutoff*purity, 1, 1/purity))
+prob.present <- 1-p.mut.no
+
+
+
+#-------------------------------------------------------
+#-- Auxiliary function:  EI function value at x
+#-------------------------------------------------------
+EI.fun <- function(x, coord){
+  
+  ind<-which(coord$spots <= x)
+  
+  if(length(ind)){
+    
+    out<-max(coord$diam[ind])
+    
+  } else {
+    
+    out<-0
+  }
+  
+  return(out)
+}
+
+#-- Vectorize the function 
+EI.fun<-Vectorize(EI.fun, vectorize.args = "x")
+
+
+
+
+
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+
+#-----------------------------------------------
+#-----------------------------------------------
+#-- MAIN FUNCTION
+#-----------------------------------------------
+#-----------------------------------------------
+
+Summative_EI <- function(DCIS_name,prob.present){
+  
+  #-- Reading in the tumors
+  DCIS_path <- paste("Data/Cleaned_Mutation_calls/CleanedBayesian_Tumor_", DCIS_name, ".csv", sep = "")
+  Tumor <- as.data.frame(read_csv(DCIS_path))
+  Tumor <- Tumor[-1,-1]
+  
+  #-- Removing non-DCIS spots
+  Tumor <- Tumor[which(Tumor$Histology == "DCIS"),]
+  
+  
+  #-- Replace NA values with prior probability
+  for(i in 1:dim(Tumor)[1]){
+    for(j in 13:dim(Tumor)[2]){
+      if(is.na(Tumor[i,j])){
+        Tumor[i,j] <- prob.present
+      }
+    }
+  }
+  
+  #-----------------------------------------------
+  #-- Single realization
+  #-----------------------------------------------
+  sheet1 <- Tumor
+  for(row in 1:dim(sheet1)[1]){
+    for(column in 13:dim(sheet1)[2]){
+      sheet1[row,column] <- sample(c(0,1),1,prob = c(1-sheet1[row,column],sheet1[row,column]))
+    }
+  }
+  
+  
+  #-----------------------------------------------
+  #-- Spatial distances
+  #-----------------------------------------------
+  
+  #-- Pairwise distances
+  Spat <- data.frame(matrix(nrow = (dim(Tumor)[1]^2), ncol = 3))
+  colnames(Spat) <- c("From", "To","Distance")
+  
+  #-- Spot names
+  Spat[,2] <- c(rep(Tumor$Spot, times = length.POSIXlt(Tumor)))
+  Spat[,1] <- c(rep(Tumor$Spot, each = length.POSIXlt(Tumor)))
+  
+  #-- Remove row duplicates  or with 2 of the same spot
+  remove <- c()
+  for(i in 1:dim(Spat)[1]){
+    if(Spat[i,1] >= Spat[i,2]){
+      remove <- c(remove,i)
+    }
+  }
+  if(length(remove)){Spat <- Spat[-remove,]}
+  
+  #-- Spatial distance between each spot
+  for(i in 1:dim(Spat)[1]){
+    row1 <- Tumor[which(Tumor$Spot == Spat[i,1]),2:4]
+    row2 <- Tumor[which(Tumor$Spot == Spat[i,2]),2:4]
+    Spat[i,3] <- dist(rbind(row1,row2))
+  }
+  
+  
+  #-----------------------------------------------
+  #-- Calculate EI
+  #-----------------------------------------------
+  
+  #-- Make a dataframe in which to store values
+  EIsheet <- data.frame(matrix(ncol = 5,nrow = dim(sheet1)[2] - 12))
+  colnames(EIsheet) <- c("Mutation","Diameter","diam","Total_spots","spots")
+  
+  #-- Fill in mutations
+  EIsheet[,1] <- colnames(sheet1)[13:length(sheet1)]
+  
+  #-- Fill in the diameter for each spot and number of spots hit
+  for(mut in EIsheet$Mutation){
+    
+    #-- Spots each mutation has
+    mut_table <- as.data.frame(sheet1[which(sheet1[,mut] == 1),])
+    
+    #-- Fill in number of spots hit
+    EIsheet[which(EIsheet$Mutation == mut),4] <- length(mut_table$Spot)
+    
+    #-- Return 0 if there is 1 or less spot, otherwise continuing
+    if(length(mut_table$Spot) <= 1){
+      EIsheet[which(EIsheet$Mutation == mut),2] <- 0
+      next
+    }
+    
+    #-- Use those spots to make a table of spatial distances
+    spotstokeep <- c(mut_table$Spot)
+    keepers <- c()
+    for(i in 1:length.POSIXlt(Spat)){
+      if(any(spotstokeep == Spat[i,1]) & any(spotstokeep == Spat[i,2]))
+        keepers <- c(keepers,i)
+    }
+    mutdistances <- Spat[keepers,]
+    
+    #-- Fill in max diameter
+    EIsheet[which(EIsheet$Mutation == mut),2] <- max(mutdistances$Distance)
+    
+  }
+  
+  #-- Fill in normalized diameter
+  EIsheet[,3] <- EIsheet[,2]/max(Spat$Distance)
+  
+  #-- Fill in percentage of spots hit
+  EIsheet[,5] <- EIsheet[,4]/length.POSIXlt(sheet1)
+  
+  
+  #-- Table with only needed columns
+  plot_sheet <- EIsheet[,c("diam","spots")]
+  
+  #-- Sheet to construct line
+  uniqueupper <- as.data.frame(plot_sheet %>% group_by(spots) %>% summarise(diam = max(diam)))
+  
+  #-- Removing rows where diameters are smaller at a higher percentage of spots
+  remove <- c()
+  for(i in 2:length.POSIXlt(uniqueupper)){
+    if(any(uniqueupper[1:(i-1),2] >= uniqueupper[i,2])){
+      remove <- c(remove,i)
+    }
+  }
+  if(length(remove) > 0){
+    uniqueupper <- uniqueupper[-remove,]
+  }
+  
+  #-- Add in a point at the top right so line is complete and bottom left
+  if(uniqueupper[length.POSIXlt(uniqueupper),1] != 1 | uniqueupper[length.POSIXlt(uniqueupper),2] != 1){
+    uniqueupper[length.POSIXlt(uniqueupper) + 1,] <- c(1,1)
+  }
+  
+  if(uniqueupper[1,1] != 0 | uniqueupper[1,2] != 0){
+    newrow <- c(0,0)
+    uniqueupper <- as.data.frame(rbind(newrow,uniqueupper))
+  }
+  
+  
+  #-- New dataframe which contains all points the line should go through
+  AUCvalues <- uniqueupper
+  na.df <- data.frame(num = NA, let = NA)
+  AUCvalues <- as.data.frame(do.call(rbind, apply(AUCvalues, 1, function(x) {rbind(x, na.df)})))
+  AUCvalues <- AUCvalues[-length.POSIXlt(AUCvalues),]
+  row.names(AUCvalues) <- 1:length.POSIXlt(AUCvalues)
+  colnames(AUCvalues) <- c("spots","diam")
+  
+  #-- Fill in empty rows
+  for(i in 1:length.POSIXlt(AUCvalues)){
+    if(any(is.na(AUCvalues[i,]))){
+      AUCvalues[i,1] <- AUCvalues[i+1,1]
+      AUCvalues[i,2] <- AUCvalues[i-1,2]
+    }
+  }
+
+  #-- Calculate the EI
+  EI_val<- integrate(EI.fun, 0, 1, coord=AUCvalues)
+  EI_val<- EI_val$value
+  
+  
+  #-----------------------------------------------
+  #-- Create the Plot
+  #-----------------------------------------------
+  
+
+  #-- Extract data
+  Plot_data <-plot_sheet
+  Line_data <- AUCvalues
+  
+  par(mar=c(4,4,4,4)+0.1)
+  
+  g2 <- ggplot(Plot_data, aes(x = spots, y = diam)) + 
+    #geom_jitter(width = 0.01,size = 3,pch = 16, color = pal1[1])  + 
+    labs(x = "Fraction of Spots", y = "Normalized Diameter", title = paste("Tumor ", DCIS_name)) +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    coord_cartesian(ylim = c(0,1.0), xlim = c(0,1)) +
+    theme( axis.line = element_line(colour = "black", size = 1, linetype = "solid")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+    theme(axis.title.x = element_text(size = 25), axis.title.y = element_text(size = 25), plot.title = element_text(size = 25,face = "bold")) +
+    theme(axis.text.x = element_text(face="bold",size=25),axis.text.y = element_text(face="bold", size=25)) +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = pal1[3]) 
+  
+  #-- Add in line
+  for(i in 1:(length.POSIXlt(Line_data)-1)){
+    g2 <- g2 + geom_segment(x = Line_data$spots[i], y = Line_data$diam[i],xend  = Line_data$spots[i+1],yend = Line_data$diam[i+1])
+  }
+  
+  #-- Shading of area
+  for(i in 1:(length.POSIXlt(Line_data)-1)){
+    g2 <- g2 + annotate("rect",fill = pal1[2],alpha = 0.6, xmin = Line_data[i,1], ymin = 0, xmax = Line_data[i+1,1], ymax = Line_data[i+1,2])
+  }
+  
+  #-- Add the dots
+  g2 <- g2 + geom_jitter(width = 0.01,size = 3,pch = 16, color = pal1[1]) +
+    annotate("text",color = pal1[1],x = 0.88, y = 0.05, label = paste("EI =", round(EI_val,digits = 2)), size = 5) 
+  
+
+  #-- Return the plot
+  return(g2)
+  
+}
+
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+#-----------------------------------------------
+#-- Loop over tumors to create the plots
+#-----------------------------------------------
+EI_store <- vector(mode = "list", length = length(Tumornames))
+names(EI_store) <- Tumornames
+
+for(nam in Tumornames){
+  print(nam)
+  EI_store[[nam]] <- Summative_EI(nam,prob.present)
+}
+```
+
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+
+#-- Plot them
+EI_store[["03"]]
+EI_store[["17"]]
+EI_store[["24"]]
+EI_store[["211"]]
+EI_store[["213"]]
+EI_store[["225"]]
+EI_store[["227"]]
+EI_store[["315"]]
+EI_store[["53"]]
+EI_store[["65"]]
+EI_store[["66"]]
+EI_store[["88"]]
+EI_store[["91"]]
+EI_store[["168"]]
+EI_store[["173"]]
+EI_store[["191"]]
+EI_store[["286"]]
+
+```
+
